@@ -1,5 +1,6 @@
 import { config, keys } from './config.js';
 import { redis } from './redisClient.js';
+import { bus } from './events.js';
 import { listPc4Codes } from './geojson.js';
 import {
   findAddressesInPc4,
@@ -28,6 +29,18 @@ export const proberState = {
   cooldownMs: COOLDOWN_BASE_MS,
   blocks: 0,
 };
+
+// Slim payload pushed to live SSE clients (matches the /api/coverage shape).
+function emitCoverage(pc4, rec) {
+  bus.emit('coverage', {
+    pc4,
+    s: rec.status,
+    city: rec.city || null,
+    municipality: rec.municipality || null,
+    province: rec.province || null,
+    postcode: rec.postcode || null,
+  });
+}
 
 async function isFresh(pc4) {
   const raw = await redis.get(keys.coverage(pc4));
@@ -135,6 +148,7 @@ async function worker(queue) {
       const rec = await probeOne(pc4);
       await redis.set(keys.coverage(pc4), JSON.stringify(rec));
       proberState.lastPc4 = pc4;
+      emitCoverage(pc4, rec);
       // Healthy response — relax the back-off.
       proberState.cooldownMs = COOLDOWN_BASE_MS;
     } catch (err) {
@@ -151,10 +165,9 @@ async function worker(queue) {
         proberState.cooldownMs = Math.min(proberState.cooldownMs * 2, COOLDOWN_MAX_MS);
         continue;
       }
-      await redis.set(
-        keys.coverage(pc4),
-        JSON.stringify({ status: 'error', pc4, reason: err.message, ts: Date.now() }),
-      );
+      const rec = { status: 'error', pc4, reason: err.message, ts: Date.now() };
+      await redis.set(keys.coverage(pc4), JSON.stringify(rec));
+      emitCoverage(pc4, rec);
     }
     proberState.done++;
     await sleep(config.probeDelayMs);

@@ -93,8 +93,11 @@ async function loadMap() {
     },
   }).addTo(map);
 
-  await refresh();
-  pollLoop();
+  // First paint + live updates via SSE (falls back to polling if unsupported).
+  if (window.EventSource) streamStart();
+  else pollFallback();
+  // Keep the cooldown countdown ticking smoothly every second, locally.
+  setInterval(renderProgress, 1000);
 }
 
 function pc4Of(f) {
@@ -105,30 +108,57 @@ function toContainer(e) {
 }
 
 // ---- Live updates ----------------------------------------------------------
-async function refresh() {
-  const [cov, status] = await Promise.all([
-    fetch('/api/coverage').then((r) => r.json()),
-    fetch('/api/status').then((r) => r.json()),
-  ]);
-
-  // Restyle only the areas whose status changed since last poll.
-  for (const [pc4, rec] of Object.entries(cov)) {
-    const prev = coverage[pc4];
-    if (!prev || prev.s !== rec.s) {
-      const layer = layersByPc4[pc4];
-      if (layer) layer.setStyle(STYLES[rec.s] || STYLES.pending);
-    }
-  }
-  coverage = cov;
-  updateStats(status);
+let lastStatus = {};
+// Track cooldown as (remaining-at-receipt, received-at) so we can count down
+// locally without depending on server/client clock skew.
+let cooldown = { ms: 0, at: 0 };
+function setCooldown(ms) {
+  cooldown = { ms: ms || 0, at: Date.now() };
+}
+function tickedCooldown() {
+  return Math.max(0, cooldown.ms - (Date.now() - cooldown.at));
 }
 
-function updateStats(s) {
-  const c = s.counts || {};
-  const covered = c.covered || 0;
-  const waitlist = c.waitlist || 0;
-  const none = (c.not_found || 0) + (c.invalid || 0) + (c.nodata || 0) + (c.error || 0);
-  const total = s.total || 0;
+function restyle(pc4, s) {
+  const layer = layersByPc4[pc4];
+  if (layer) layer.setStyle(STYLES[s] || STYLES.pending);
+}
+
+// Apply a single live area update (the prober just probed this PC4).
+function applyCoverageDelta(d) {
+  const prev = coverage[d.pc4];
+  coverage[d.pc4] = d;
+  if (!prev || prev.s !== d.s) restyle(d.pc4, d.s);
+  renderCounts();
+}
+
+// Apply a full snapshot (on (re)connect or polling tick).
+function applySnapshot(cov, status) {
+  for (const [pc4, rec] of Object.entries(cov)) {
+    const prev = coverage[pc4];
+    if (!prev || prev.s !== rec.s) restyle(pc4, rec.s);
+  }
+  coverage = cov;
+  if (status) onStatus(status);
+  else { renderCounts(); renderProgress(); }
+}
+
+function onStatus(status) {
+  lastStatus = status;
+  setCooldown(status.cooldownMs);
+  renderCounts();
+  renderProgress();
+}
+
+// Counts are derived from the coverage map the client already holds.
+function renderCounts() {
+  let covered = 0, waitlist = 0, none = 0;
+  for (const v of Object.values(coverage)) {
+    if (v.s === 'covered') covered++;
+    else if (v.s === 'waitlist') waitlist++;
+    else none++; // not_found / invalid / nodata / error
+  }
+  const total = lastStatus.total || 0;
   const pending = Math.max(0, total - covered - waitlist - none);
 
   // "Served" share is among areas where we got a definitive Picnic answer.
@@ -141,33 +171,62 @@ function updateStats(s) {
   document.getElementById('cntWaitlist').textContent = waitlist.toLocaleString();
   document.getElementById('cntNone').textContent = none.toLocaleString();
   document.getElementById('cntPending').textContent = pending.toLocaleString();
+}
 
-  const done = s.done || 0;
+// Progress bar, live cooldown countdown, and API budget.
+function renderProgress() {
+  const total = lastStatus.total || 0;
+  const done = lastStatus.done || 0;
   document.getElementById('progressCount').textContent =
     `${done.toLocaleString()} / ${total.toLocaleString()}`;
-  document.getElementById('scanBar').style.width =
-    total ? (done / total) * 100 + '%' : '0%';
+  document.getElementById('scanBar').style.width = total ? (done / total) * 100 + '%' : '0%';
 
   const progressEl = document.querySelector('.progress');
   const label = document.getElementById('progressLabel');
-  if (s.cooldownMs > 0) {
+  const remaining = tickedCooldown();
+  if (remaining > 0) {
     progressEl.classList.remove('done');
-    label.textContent = `Rate-limited — resuming in ${Math.ceil(s.cooldownMs / 1000)}s…`;
-  } else if (s.running) {
+    label.textContent = `Rate-limited — resuming in ${Math.ceil(remaining / 1000)}s…`;
+  } else if (lastStatus.running) {
     progressEl.classList.remove('done');
     label.textContent = 'Scanning postcode areas…';
-  } else {
+  } else if (lastStatus.total) {
     progressEl.classList.add('done');
     label.textContent = 'Scan complete';
   }
 
-  const pt = s.postcodeTech || {};
+  const pt = lastStatus.postcodeTech || {};
   document.getElementById('budgetLabel').textContent =
     `postcode.tech: ${(pt.used || 0).toLocaleString()} / ${(pt.limit || 0).toLocaleString()} calls today`;
 }
 
-function pollLoop() {
-  setInterval(refresh, 4000);
+// Live stream — push updates as the prober works.
+function streamStart() {
+  const es = new EventSource('/api/stream');
+  es.addEventListener('snapshot', (e) => {
+    const m = JSON.parse(e.data);
+    applySnapshot(m.coverage, m.status);
+  });
+  es.addEventListener('coverage', (e) => applyCoverageDelta(JSON.parse(e.data)));
+  es.addEventListener('status', (e) => onStatus(JSON.parse(e.data)));
+  // EventSource auto-reconnects on a dropped connection; nothing to do on error.
+}
+
+// Fallback for browsers without EventSource.
+function pollFallback() {
+  const tickPoll = async () => {
+    try {
+      const [cov, status] = await Promise.all([
+        fetch('/api/coverage').then((r) => r.json()),
+        fetch('/api/status').then((r) => r.json()),
+      ]);
+      applySnapshot(cov, status);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+  tickPoll();
+  setInterval(tickPoll, 4000);
 }
 
 loadMap().catch((err) => {

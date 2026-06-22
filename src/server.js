@@ -5,6 +5,7 @@ import { redis } from './redisClient.js';
 import { loadGeojson } from './geojson.js';
 import { startProber, proberState } from './prober.js';
 import { ptBudgetUsed } from './sources.js';
+import { bus } from './events.js';
 
 const app = express();
 app.use(express.json());
@@ -98,6 +99,72 @@ app.get('/api/status', async (_req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Lightweight progress payload (no Redis scan — safe to push every second).
+// Counts are derived client-side from the coverage map it already holds.
+async function liveStatus() {
+  return {
+    running: proberState.running,
+    paused: proberState.paused,
+    total: proberState.total,
+    done: proberState.done,
+    blocks: proberState.blocks,
+    lastPc4: proberState.lastPc4,
+    cooldownMs: Math.max(0, proberState.cooldownUntil - Date.now()),
+    postcodeTech: { used: await ptBudgetUsed(), limit: config.postcodeTechDailyLimit },
+    updatedAt: Date.now(),
+  };
+}
+
+// --- Live updates over Server-Sent Events ---
+// On connect we push a full snapshot, then stream each area the moment the
+// prober probes it, plus a lightweight status tick once a second.
+app.get('/api/stream', async (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no', // disable proxy buffering (nginx/ingress)
+  });
+  res.flushHeaders?.();
+
+  const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+
+  try {
+    const [coverage, status] = await Promise.all([readAllCoverage(), liveStatus()]);
+    // Slim the snapshot to the same shape as the streamed deltas.
+    const slim = {};
+    for (const [pc4, r] of Object.entries(coverage)) {
+      slim[pc4] = {
+        s: r.status,
+        city: r.city || null,
+        municipality: r.municipality || null,
+        province: r.province || null,
+        postcode: r.postcode || null,
+      };
+    }
+    send('snapshot', { coverage: slim, status });
+  } catch (err) {
+    send('error', { message: err.message });
+  }
+
+  const onCoverage = (delta) => send('coverage', delta);
+  bus.on('coverage', onCoverage);
+
+  const statusTimer = setInterval(async () => {
+    try {
+      send('status', await liveStatus());
+    } catch {
+      /* ignore transient errors */
+    }
+  }, 1000);
+
+  req.on('close', () => {
+    clearInterval(statusTimer);
+    bus.off('coverage', onCoverage);
+    res.end();
+  });
 });
 
 // --- Manual control: (re)start a probing sweep ---
