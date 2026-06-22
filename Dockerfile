@@ -13,4 +13,5 @@ COPY public ./public
 ENV NODE_ENV=production
 EXPOSE 3000
 
-CMD ["node", "src/server.js"]
+# Role selected at runtime via APP_ROLE (server | prober | all). Default: all.
+CMD ["node", "src/index.js"]

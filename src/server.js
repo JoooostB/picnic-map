@@ -2,13 +2,15 @@ import express from 'express';
 import path from 'path';
 import { config, keys } from './config.js';
 import { redis } from './redisClient.js';
-import { loadGeojson } from './geojson.js';
-import { startProber, proberState } from './prober.js';
+import { loadGeojson, listPc4Codes } from './geojson.js';
 import { ptBudgetUsed } from './sources.js';
 import { bus } from './events.js';
 
 const app = express();
 app.use(express.json());
+
+// Total number of PC4 areas (constant for a run); cached to avoid re-parsing.
+let pc4Total = 0;
 
 // --- Static frontend ---
 app.use(express.static(path.resolve('public')));
@@ -28,13 +30,7 @@ async function readAllCoverage() {
   const out = {};
   let cursor = '0';
   do {
-    const [next, batch] = await redis.scan(
-      cursor,
-      'MATCH',
-      `${keys.coveragePrefix}*`,
-      'COUNT',
-      500,
-    );
+    const [next, batch] = await redis.scan(cursor, 'MATCH', `${keys.coveragePrefix}*`, 'COUNT', 500);
     cursor = next;
     if (batch.length) {
       const vals = await redis.mget(batch);
@@ -53,73 +49,89 @@ async function readAllCoverage() {
   return out;
 }
 
-// --- Coverage map: { "1011": {status, city, ...}, ... } ---
+function slimCoverage(cov) {
+  const slim = {};
+  for (const [pc4, r] of Object.entries(cov)) {
+    slim[pc4] = {
+      s: r.status,
+      city: r.city || null,
+      municipality: r.municipality || null,
+      province: r.province || null,
+      postcode: r.postcode || null,
+    };
+  }
+  return slim;
+}
+
+// --- Coverage map: { "1011": {s, city, ...}, ... } ---
 app.get('/api/coverage', async (_req, res) => {
   try {
-    const cov = await readAllCoverage();
-    // Slim payload: drop bulky fields the map doesn't need.
-    const slim = {};
-    for (const [pc4, r] of Object.entries(cov)) {
-      slim[pc4] = {
-        s: r.status,
-        city: r.city || null,
-        municipality: r.municipality || null,
-        province: r.province || null,
-        postcode: r.postcode || null,
-      };
-    }
-    res.set('Cache-Control', 'no-store').json(slim);
+    res.set('Cache-Control', 'no-store').json(slimCoverage(await readAllCoverage()));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- Progress + stats ---
-app.get('/api/status', async (_req, res) => {
-  try {
-    const cov = await readAllCoverage();
-    const counts = { covered: 0, waitlist: 0, not_found: 0, invalid: 0, nodata: 0, error: 0 };
-    for (const r of Object.values(cov)) {
-      counts[r.status] = (counts[r.status] || 0) + 1;
-    }
-    const probed = Object.keys(cov).length;
-    res.set('Cache-Control', 'no-store').json({
-      running: proberState.running,
-      paused: proberState.paused,
-      total: proberState.total,
-      done: proberState.done,
-      probed,
-      counts,
-      lastPc4: proberState.lastPc4,
-      blocks: proberState.blocks,
-      cooldownMs: Math.max(0, proberState.cooldownUntil - Date.now()),
-      postcodeTech: { used: await ptBudgetUsed(), limit: config.postcodeTechDailyLimit },
-      updatedAt: Date.now(),
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Lightweight progress payload (no Redis scan — safe to push every second).
-// Counts are derived client-side from the coverage map it already holds.
+// Aggregate progress across all live prober pods (cheap: a handful of heartbeat
+// keys). The "rate-limited" state only shows when EVERY active prober's egress
+// IP is cooling down — if one node can still reach Picnic, work continues.
 async function liveStatus() {
+  const ids = await redis.smembers(keys.probers);
+  let probers = 0;
+  let coolingDown = 0;
+  let blocks = 0;
+  let minCooldown = Infinity;
+  let lastPc4 = null;
+  let lastTs = 0;
+  for (const id of ids) {
+    const raw = await redis.get(keys.prober(id));
+    if (!raw) {
+      await redis.srem(keys.probers, id); // expired heartbeat — prune
+      continue;
+    }
+    let p;
+    try {
+      p = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    probers++;
+    blocks += p.blocks || 0;
+    if (p.cooldownMs > 0) {
+      coolingDown++;
+      if (p.cooldownMs < minCooldown) minCooldown = p.cooldownMs;
+    }
+    if ((p.ts || 0) > lastTs) {
+      lastTs = p.ts;
+      lastPc4 = p.lastPc4;
+    }
+  }
+  const cooldownMs = probers > 0 && coolingDown === probers && minCooldown !== Infinity ? minCooldown : 0;
   return {
-    running: proberState.running,
-    paused: proberState.paused,
-    total: proberState.total,
-    done: proberState.done,
-    blocks: proberState.blocks,
-    lastPc4: proberState.lastPc4,
-    cooldownMs: Math.max(0, proberState.cooldownUntil - Date.now()),
+    running: probers > 0,
+    probers,
+    coolingDown,
+    total: pc4Total,
+    blocks,
+    lastPc4,
+    cooldownMs,
     postcodeTech: { used: await ptBudgetUsed(), limit: config.postcodeTechDailyLimit },
     updatedAt: Date.now(),
   };
 }
 
+// --- Progress + stats (also the server pod's readiness probe target) ---
+app.get('/api/status', async (_req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store').json(await liveStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- Live updates over Server-Sent Events ---
-// On connect we push a full snapshot, then stream each area the moment the
-// prober probes it, plus a lightweight status tick once a second.
+// On connect we push a full snapshot, then stream each area the moment ANY
+// prober pod probes it (delivered via Redis pub/sub), plus a status tick/second.
 app.get('/api/stream', async (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -133,18 +145,7 @@ app.get('/api/stream', async (req, res) => {
 
   try {
     const [coverage, status] = await Promise.all([readAllCoverage(), liveStatus()]);
-    // Slim the snapshot to the same shape as the streamed deltas.
-    const slim = {};
-    for (const [pc4, r] of Object.entries(coverage)) {
-      slim[pc4] = {
-        s: r.status,
-        city: r.city || null,
-        municipality: r.municipality || null,
-        province: r.province || null,
-        postcode: r.postcode || null,
-      };
-    }
-    send('snapshot', { coverage: slim, status });
+    send('snapshot', { coverage: slimCoverage(coverage), status });
   } catch (err) {
     send('error', { message: err.message });
   }
@@ -167,21 +168,31 @@ app.get('/api/stream', async (req, res) => {
   });
 });
 
-// --- Manual control: (re)start a probing sweep ---
-app.post('/api/probe/start', async (_req, res) => {
-  startProber().catch((e) => console.error(e));
-  res.json({ ok: true, running: proberState.running });
-});
+/** Start the web server: static UI, JSON API, SSE, and the cross-pod event relay. */
+export async function startServer() {
+  // Live coverage deltas arrive over Redis pub/sub from prober pod(s); re-emit
+  // them onto the in-process bus that the SSE handler listens to.
+  const sub = redis.duplicate();
+  sub.on('message', (channel, message) => {
+    if (channel !== keys.events) return;
+    try {
+      bus.emit('coverage', JSON.parse(message));
+    } catch {
+      /* ignore malformed */
+    }
+  });
+  sub.subscribe(keys.events).catch((e) => console.error('[server] subscribe failed:', e.message));
 
-const server = app.listen(config.port, () => {
-  console.log(`[server] listening on :${config.port}`);
-  // Warm the GeoJSON cache, then begin probing automatically.
-  loadGeojson()
-    .then(() => {
-      if (config.probeEnabled) return startProber();
-    })
-    .catch((e) => console.error('[startup]', e));
-});
+  // Warm the GeoJSON cache and remember the area count for progress reporting.
+  try {
+    await loadGeojson();
+    pc4Total = (await listPc4Codes()).length;
+  } catch (e) {
+    console.error('[server] geojson warmup failed:', e.message);
+  }
 
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
-process.on('SIGINT', () => server.close(() => process.exit(0)));
+  const server = app.listen(config.port, () => console.log(`[server] listening on :${config.port}`));
+  process.on('SIGTERM', () => server.close(() => process.exit(0)));
+  process.on('SIGINT', () => server.close(() => process.exit(0)));
+  return server;
+}

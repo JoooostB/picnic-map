@@ -1,6 +1,6 @@
+import http from 'http';
 import { config, keys } from './config.js';
 import { redis } from './redisClient.js';
-import { bus } from './events.js';
 import { listPc4Codes } from './geojson.js';
 import {
   findAddressesInPc4,
@@ -13,26 +13,27 @@ import {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Adaptive back-off shared across workers when Picnic rate-limits us.
+// Adaptive back-off when Picnic rate-limits us. This lives PER POD on purpose:
+// Picnic's WAF blocks by egress IP, so each DaemonSet pod (= distinct node IP)
+// backs off independently — a block on one node never pauses the others.
 const COOLDOWN_BASE_MS = 45_000;
 const COOLDOWN_MAX_MS = 5 * 60_000;
 
 export const proberState = {
   running: false,
   total: 0,
-  done: 0,
+  done: 0, // areas this pod has probed since start (informational)
   startedAt: null,
   lastPc4: null,
-  paused: false,
-  pauseReason: null,
   cooldownUntil: 0,
   cooldownMs: COOLDOWN_BASE_MS,
   blocks: 0,
 };
 
-// Slim payload pushed to live SSE clients (matches the /api/coverage shape).
+// Live coverage deltas go through Redis pub/sub so they reach the server pod(s)
+// no matter which prober pod produced them. The server re-emits them to SSE.
 function emitCoverage(pc4, rec) {
-  bus.emit('coverage', {
+  const payload = JSON.stringify({
     pc4,
     s: rec.status,
     city: rec.city || null,
@@ -40,6 +41,7 @@ function emitCoverage(pc4, rec) {
     province: rec.province || null,
     postcode: rec.postcode || null,
   });
+  redis.publish(keys.events, payload).catch(() => {});
 }
 
 async function isFresh(pc4) {
@@ -57,8 +59,8 @@ async function isFresh(pc4) {
 /**
  * Probe a single PC4 area:
  *  1. Discover real candidate addresses via PDOK.
- *  2. Enrich/validate via postcode.tech (budgeted).
- *  3. Check Picnic coverage (try alternates if Picnic doesn't know the address).
+ *  2. Check Picnic coverage (try alternates if Picnic doesn't know the address).
+ *  3. Enrich/validate via postcode.tech (globally budgeted across all pods).
  */
 async function probeOne(pc4) {
   let candidates = [];
@@ -122,43 +124,75 @@ async function probeOne(pc4) {
   };
 }
 
-async function worker(queue) {
-  while (queue.length) {
-    if (proberState.paused) {
-      await sleep(5000);
-      continue;
-    }
+// ---- Shared work queue (Redis) --------------------------------------------
 
-    // Respect a shared cooldown after a Picnic block.
+// Refill the queue with every area that still needs probing. Guarded by a lock
+// so only one pod scans the keyspace at a time.
+async function refillQueue() {
+  const got = await redis.set(keys.fillLock, config.proberId, 'NX', 'EX', config.fillLockTtlS);
+  if (!got) return false;
+
+  const codes = await listPc4Codes();
+  proberState.total = codes.length;
+  let added = 0;
+  for (const pc4 of codes) {
+    if (await isFresh(pc4)) continue;
+    if (await redis.exists(keys.claim(pc4))) continue; // in-flight on some pod
+    await redis.rpush(keys.queue, pc4);
+    added++;
+  }
+  if (added) console.log(`[prober] refilled queue with ${added} areas`);
+  return added > 0;
+}
+
+// Claim the next area to probe, or null if there's nothing to do right now.
+async function nextPc4() {
+  let pc4 = await redis.lpop(keys.queue);
+  if (pc4) return pc4;
+  await refillQueue(); // empty — try to (re)fill it (one pod wins the lock)
+  return redis.lpop(keys.queue);
+}
+
+async function worker() {
+  while (proberState.running) {
+    // This pod's egress IP is cooling down after a Picnic block.
     const wait = proberState.cooldownUntil - Date.now();
     if (wait > 0) {
-      await sleep(Math.min(wait, 5000));
+      await sleep(Math.min(wait, 3000));
       continue;
     }
 
-    const pc4 = queue.shift();
-    if (!pc4) break;
+    const pc4 = await nextPc4();
+    if (!pc4) {
+      await sleep(config.idleWaitMs); // queue drained and everything is fresh
+      continue;
+    }
 
+    // Mark in-flight so another pod won't grab the same area during a refill race.
+    const claimed = await redis.set(keys.claim(pc4), config.proberId, 'NX', 'EX', config.claimTtlS);
+    if (!claimed) continue;
     if (await isFresh(pc4)) {
-      proberState.done++;
+      await redis.del(keys.claim(pc4));
       continue;
     }
 
     try {
       const rec = await probeOne(pc4);
       await redis.set(keys.coverage(pc4), JSON.stringify(rec));
+      await redis.del(keys.claim(pc4));
       proberState.lastPc4 = pc4;
+      proberState.done++;
       emitCoverage(pc4, rec);
-      // Healthy response — relax the back-off.
-      proberState.cooldownMs = COOLDOWN_BASE_MS;
+      proberState.cooldownMs = COOLDOWN_BASE_MS; // healthy — relax the back-off
     } catch (err) {
       if (err instanceof PicnicBlockedError) {
-        // Don't consume this area; re-queue and cool down with exponential back-off.
-        queue.unshift(pc4);
+        // Put it back for another (un-blocked) pod and cool down THIS pod.
+        await redis.lpush(keys.queue, pc4);
+        await redis.del(keys.claim(pc4));
         proberState.blocks++;
         proberState.cooldownUntil = Date.now() + proberState.cooldownMs;
         console.warn(
-          `[prober] Picnic blocked (rate limit) — cooling down ${Math.round(
+          `[prober ${config.proberId}] Picnic blocked — cooling down ${Math.round(
             proberState.cooldownMs / 1000,
           )}s (block #${proberState.blocks})`,
         );
@@ -167,34 +201,68 @@ async function worker(queue) {
       }
       const rec = { status: 'error', pc4, reason: err.message, ts: Date.now() };
       await redis.set(keys.coverage(pc4), JSON.stringify(rec));
+      await redis.del(keys.claim(pc4));
+      proberState.done++;
       emitCoverage(pc4, rec);
     }
-    proberState.done++;
     await sleep(config.probeDelayMs);
   }
 }
 
-/** Kick off (or resume) probing of every PC4 area. Idempotent. */
+// ---- Liveness heartbeat ----------------------------------------------------
+
+async function heartbeat() {
+  const payload = JSON.stringify({
+    id: config.proberId,
+    cooldownMs: Math.max(0, proberState.cooldownUntil - Date.now()),
+    blocks: proberState.blocks,
+    done: proberState.done,
+    lastPc4: proberState.lastPc4,
+    ts: Date.now(),
+  });
+  try {
+    await redis.sadd(keys.probers, config.proberId);
+    await redis.set(keys.prober(config.proberId), payload, 'EX', config.heartbeatTtlS);
+  } catch {
+    /* transient */
+  }
+}
+
+/** Start this pod's probing workers + heartbeat. Idempotent. */
 export async function startProber() {
   if (proberState.running) return;
   proberState.running = true;
   proberState.startedAt = Date.now();
 
-  const codes = await listPc4Codes();
-  proberState.total = codes.length;
-  proberState.done = 0;
+  try {
+    const codes = await listPc4Codes();
+    proberState.total = codes.length;
+  } catch {
+    /* total is also re-set on refill */
+  }
 
-  // Shared work queue consumed by N polite workers.
-  const queue = [...codes];
-  const workers = Array.from({ length: Math.max(1, config.probeConcurrency) }, () =>
-    worker(queue),
+  await heartbeat();
+  setInterval(heartbeat, config.heartbeatMs);
+
+  console.log(
+    `[prober ${config.proberId}] started, concurrency=${config.probeConcurrency}, delay=${config.probeDelayMs}ms`,
   );
+  for (let i = 0; i < Math.max(1, config.probeConcurrency); i++) {
+    worker().catch((e) => console.error('[prober] worker crashed', e));
+  }
+}
 
-  console.log(`[prober] probing ${codes.length} PC4 areas, concurrency=${config.probeConcurrency}`);
-  Promise.all(workers)
-    .then(() => console.log('[prober] sweep complete'))
-    .catch((e) => console.error('[prober] error', e))
-    .finally(() => {
-      proberState.running = false;
-    });
+/** Minimal HTTP server so prober-only pods have a k8s health endpoint. */
+export function startHealthServer() {
+  const server = http.createServer((req, res) => {
+    if (req.url === '/healthz' || req.url === '/api/status') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, role: 'prober', id: config.proberId }));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  server.listen(config.port, () => console.log(`[prober] health server on :${config.port}`));
+  return server;
 }

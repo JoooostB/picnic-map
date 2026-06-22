@@ -176,7 +176,7 @@ function renderCounts() {
 // Progress bar, live cooldown countdown, and API budget.
 function renderProgress() {
   const total = lastStatus.total || 0;
-  const done = lastStatus.done || 0;
+  const done = Object.keys(coverage).length; // areas with a result, live
   document.getElementById('progressCount').textContent =
     `${done.toLocaleString()} / ${total.toLocaleString()}`;
   document.getElementById('scanBar').style.width = total ? (done / total) * 100 + '%' : '0%';
@@ -184,15 +184,20 @@ function renderProgress() {
   const progressEl = document.querySelector('.progress');
   const label = document.getElementById('progressLabel');
   const remaining = tickedCooldown();
+  const probers = lastStatus.probers || 0;
+  const proberTag = probers > 1 ? ` · ${probers} probers` : '';
   if (remaining > 0) {
     progressEl.classList.remove('done');
     label.textContent = `Rate-limited — resuming in ${Math.ceil(remaining / 1000)}s…`;
   } else if (lastStatus.running) {
     progressEl.classList.remove('done');
-    label.textContent = 'Scanning postcode areas…';
-  } else if (lastStatus.total) {
+    label.textContent = `Scanning postcode areas…${proberTag}`;
+  } else if (total && done >= total) {
     progressEl.classList.add('done');
     label.textContent = 'Scan complete';
+  } else if (total) {
+    progressEl.classList.remove('done');
+    label.textContent = 'Waiting for a prober…';
   }
 
   const pt = lastStatus.postcodeTech || {};
