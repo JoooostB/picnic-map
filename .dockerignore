@@ -1,0 +1,12 @@
+.git
+.github
+node_modules
+npm-debug.log
+.env
+.envrc
+data
+docs
+*.har
+*.md
+Dockerfile
+docker-compose.yml

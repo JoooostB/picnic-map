@@ -1,0 +1,39 @@
+services:
+  redis:
+    image: redis:8-alpine
+    # Durable persistence: AOF (every write) + periodic RDB snapshots.
+    command: redis-server --appendonly yes --save 60 1000
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build: .
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=3000
+      # Picnic postcode source token (read from host .env via compose)
+      - POSTCODE_TECH_API_TOKEN=${POSTCODE_TECH_API_TOKEN}
+      # Probing knobs
+      - PROBE_ENABLED=true
+      # Be gentle: Picnic's CloudFront WAF blocks bursts. One worker, ~1s apart.
+      - PROBE_CONCURRENCY=1
+      - PROBE_DELAY_MS=1100
+      - POSTCODE_TECH_DAILY_LIMIT=9500
+    ports:
+      - "3000:3000"
+    # Cache the downloaded PC4 GeoJSON on the host so rebuilds don't re-fetch.
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+volumes:
+  redis-data:

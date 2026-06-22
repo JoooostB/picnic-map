@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Primary SEO meta -->
+  <title>Picnic bezorggebied kaart — waar bezorgt Picnic? | Picnic dekking Nederland</title>
+  <meta name="description" content="Bezorgt Picnic in jouw postcode? Bekijk de kaart van het bezorggebied van online supermarkt Picnic in Nederland. Per 4-cijferig postcodegebied zie je waar Picnic boodschappen bezorgt. Picnic delivery area map for the Netherlands — check Picnic grocery coverage by postcode." />
+  <meta name="keywords" content="Picnic bezorggebied, Picnic bezorgt in mijn postcode, waar bezorgt Picnic, Picnic dekking Nederland, Picnic postcode check, Picnic delivery area map, Picnic coverage map Netherlands, online supermarkt bezorging, boodschappen bezorgen" />
+  <meta name="robots" content="index, follow" />
+  <meta name="author" content="buskervezel.nl" />
+
+  <link rel="canonical" href="https://picnic.buskervezel.nl/" />
+  <link rel="alternate" hreflang="nl" href="https://picnic.buskervezel.nl/" />
+  <link rel="alternate" hreflang="en" href="https://picnic.buskervezel.nl/" />
+  <link rel="alternate" hreflang="x-default" href="https://picnic.buskervezel.nl/" />
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Picnic bezorggebied kaart" />
+  <meta property="og:title" content="Picnic bezorggebied kaart — waar bezorgt Picnic in Nederland?" />
+  <meta property="og:description" content="Bekijk per postcode waar online supermarkt Picnic boodschappen bezorgt. Interactieve kaart van de Picnic dekking in Nederland. Picnic grocery delivery coverage map." />
+  <meta property="og:url" content="https://picnic.buskervezel.nl/" />
+  <meta property="og:locale" content="nl_NL" />
+  <meta property="og:locale:alternate" content="en_GB" />
+  <meta property="og:image" content="https://picnic.buskervezel.nl/picnic-logo.png" />
+  <meta property="og:image:width" content="250" />
+  <meta property="og:image:height" content="250" />
+  <meta property="og:image:alt" content="Picnic logo — online supermarkt bezorging" />
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="Picnic bezorggebied kaart — waar bezorgt Picnic in Nederland?" />
+  <meta name="twitter:description" content="Bekijk per postcode waar online supermarkt Picnic boodschappen bezorgt. Interactieve kaart van de Picnic dekking in Nederland." />
+  <meta name="twitter:image" content="https://picnic.buskervezel.nl/picnic-logo.png" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23e5010b'/></svg>" />
+
+  <!-- Privacy-friendly analytics by Plausible -->
+  <script async src="https://plausible.buskervezel.nl/js/pa-42smCCLIAgOY3W6gC3f9C.js"></script>
+  <script>
+    window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};
+    plausible.init()
+  </script>
+
+  <!-- Structured data -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "WebApplication",
+        "name": "Picnic bezorggebied kaart",
+        "alternateName": "Picnic delivery area map Netherlands",
+        "url": "https://picnic.buskervezel.nl/",
+        "description": "Interactieve kaart die per 4-cijferig postcodegebied toont waar online supermarkt Picnic boodschappen in Nederland bezorgt. Interactive map showing where the Picnic grocery delivery service covers the Netherlands by postcode.",
+        "disambiguatingDescription": "Unofficial, fan-made hobby project. Not affiliated with, endorsed by, or sponsored by Picnic. \"Picnic\" and its logo are trademarks of Picnic Technologies B.V., used here for identification only. Coverage is sampled and indicative.",
+        "applicationCategory": "BrowserApplication",
+        "operatingSystem": "Web browser",
+        "inLanguage": ["nl", "en"],
+        "isAccessibleForFree": true,
+        "image": "https://picnic.buskervezel.nl/picnic-logo.png",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "EUR"
+        },
+        "about": {
+          "@type": "Organization",
+          "name": "Picnic",
+          "url": "https://picnic.app",
+          "description": "Online supermarkt die boodschappen thuisbezorgt (grocery delivery service)."
+        }
+      },
+      {
+        "@type": "WebSite",
+        "name": "Picnic bezorggebied kaart",
+        "url": "https://picnic.buskervezel.nl/",
+        "inLanguage": "nl"
+      },
+      {
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Bezorgt Picnic in mijn postcode?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Zoek je 4-cijferige postcodegebied op de kaart. Rood gekleurde gebieden geven aan waar online supermarkt Picnic op het moment van meten boodschappen bezorgt. De dekking is per gebied gemeten en indicatief."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Waar bezorgt Picnic in Nederland?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "De kaart kleurt elk Nederlands postcodegebied waar Picnic bezorgt. Zo zie je in één oogopslag de landelijke dekking van het Picnic bezorggebied."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Is this about picnics in the park?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. This map is about Picnic, the online supermarket and grocery delivery service (picnic.app), not recreational picnics. It shows which Dutch postcode areas Picnic delivers groceries to."
+            }
+          }
+        ]
+      }
+    ]
+  }
+  </script>
+</head>
+<body>
+  <!-- Indexable, screen-reader-accessible content for crawlers (the map is canvas/JS) -->
+  <div class="sr-only">
+    <h1>Picnic bezorggebied kaart — waar bezorgt Picnic in Nederland?</h1>
+    <p>
+      Deze interactieve kaart laat zien waar online supermarkt <strong>Picnic</strong> (picnic.app)
+      boodschappen thuisbezorgt in Nederland. Elk 4-cijferig postcodegebied (postcodegebied) wordt
+      in Picnic-rood gekleurd als Picnic daar bezorgt. Zo controleer je snel of <em>Picnic in jouw
+      postcode bezorgt</em> en bekijk je de landelijke dekking van het Picnic bezorggebied.
+    </p>
+    <p>
+      This is a Picnic delivery area map for the Netherlands. It visualizes the grocery delivery
+      coverage of <strong>Picnic</strong>, the Dutch online supermarket, by colouring every Dutch
+      4-digit postcode area where Picnic delivers groceries. Use it as a quick Picnic postcode check
+      to see whether Picnic delivers to your address and to view nationwide Picnic coverage.
+    </p>
+    <p>
+      Let op: dit gaat over Picnic de boodschappenbezorgdienst / online supermarkt, niet over
+      picknicken in het park. The coverage shown is sampled per area and is indicative.
+    </p>
+    <p>
+      Disclaimer: this is an unofficial, fan-made hobby project and is not affiliated with,
+      endorsed by, or sponsored by Picnic. “Picnic” and the Picnic logo are trademarks of
+      Picnic Technologies B.V., used here for identification purposes only.
+    </p>
+  </div>
+
+  <div id="map" aria-label="Map of Picnic delivery coverage in the Netherlands"></div>
+
+  <!-- Brand / title card -->
+  <header class="panel panel--brand" id="brand">
+    <img class="brand__logo" src="picnic-logo.png" alt="Picnic logo" width="46" height="46" />
+    <div class="brand__text">
+      <p class="brand__title">Picnic Coverage</p>
+      <p>Grocery delivery across the Netherlands</p>
+    </div>
+  </header>
+
+  <!-- Stats + legend -->
+  <aside class="panel panel--stats" id="stats" aria-live="polite">
+    <div class="stat-hero">
+      <div class="stat-hero__num" id="coveredPct">—</div>
+      <div class="stat-hero__label">of mapped areas are served</div>
+    </div>
+
+    <div class="bar" aria-hidden="true">
+      <div class="bar__fill" id="coveredBar" style="width:0%"></div>
+    </div>
+
+    <ul class="legend">
+      <li><span class="swatch swatch--covered"></span> Delivers here <b id="cntCovered">0</b></li>
+      <li><span class="swatch swatch--waitlist"></span> Waitlist / coming soon <b id="cntWaitlist">0</b></li>
+      <li><span class="swatch swatch--none"></span> No service / unknown <b id="cntNone">0</b></li>
+      <li><span class="swatch swatch--pending"></span> Not yet checked <b id="cntPending">0</b></li>
+    </ul>
+
+    <div class="progress">
+      <div class="progress__row">
+        <span id="progressLabel">Scanning postcode areas…</span>
+        <span id="progressCount">0 / 0</span>
+      </div>
+      <div class="bar bar--thin"><div class="bar__fill bar__fill--scan" id="scanBar" style="width:0%"></div></div>
+      <div class="progress__meta" id="budgetLabel"></div>
+    </div>
+  </aside>
+
+  <!-- Hover info -->
+  <div class="hovercard" id="hovercard" hidden>
+    <div class="hovercard__pc4" id="hcPc4"></div>
+    <div class="hovercard__place" id="hcPlace"></div>
+    <div class="hovercard__status" id="hcStatus"></div>
+  </div>
+
+  <footer class="disclaimer" id="disclaimer">
+    <details>
+      <summary>
+        <span class="disclaimer__badge">Unofficial</span>
+        <span>Fan project — <strong>not affiliated with Picnic</strong>.</span>
+        <span class="disclaimer__more">Disclaimer &amp; data ▾</span>
+      </summary>
+      <div class="disclaimer__body">
+        <p>
+          This is an unofficial, independent hobby project — quite literally vibe-coded
+          together in one afternoon. It is <strong>not affiliated with, endorsed by,
+          sponsored by, or connected to Picnic</strong> in any way. “Picnic”, the Picnic
+          logo and related names are trademarks of <strong>Picnic Technologies B.V.</strong>
+          and/or its affiliates, used here purely for identification (nominative use) to
+          indicate which service this map describes.
+        </p>
+        <p>
+          Coverage is <strong>sampled</strong> (one address per postcode area) from publicly
+          accessible endpoints and is <strong>indicative only</strong> — it may be inaccurate,
+          incomplete or out of date, and is provided <strong>“as is” without any warranty</strong>.
+          For authoritative, up-to-date delivery availability, always check
+          <a href="https://picnic.app" target="_blank" rel="noopener nofollow">picnic.app</a>.
+        </p>
+        <p class="disclaimer__data">
+          Data &amp; libraries: Picnic check-address · postcode.tech · PDOK · cartomap ·
+          OpenStreetMap / CARTO · Leaflet — not affiliated with any of these either.
+        </p>
+      </div>
+    </details>
+  </footer>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

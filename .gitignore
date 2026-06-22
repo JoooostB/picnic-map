@@ -1,0 +1,8 @@
+*.har
+.env
+.envrc
+node_modules/
+data/*.geojson
+data/*.png
+data/*.cjs
+examples/argocd*

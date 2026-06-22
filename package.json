@@ -1,0 +1,14 @@
+{
+  "name": "picnic-map",
+  "version": "1.0.0",
+  "description": "Visualise Picnic grocery delivery coverage across all Dutch postcode areas",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "ioredis": "^5.11.1"
+  }
+}
