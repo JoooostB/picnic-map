@@ -16,10 +16,12 @@ there — visualising Picnic's delivery coverage across the country.
 
 ## How it works
 
-Picnic's `check-address` endpoint tells you, for a *valid existing address*,
-whether that address is served (`waitlist_area: false`) or only on the waitlist
-(`waitlist_area: true`). To paint a whole PC4 area we need one real address
-inside it, so the pipeline per area is:
+Picnic's `check-address` endpoint returns a `waitlist_area` flag for a *valid
+existing address*. Counter-intuitively, **`waitlist_area: true` marks an area
+Picnic actively serves**, and `false` marks a not-yet-served (join-the-waitlist)
+area — the field name is the opposite of its real meaning (confirmed against
+known delivery postcodes and the Randstad core). To paint a whole PC4 area we
+need one real address inside it, so the pipeline per area is:
 
 | Step | Source | Purpose |
 |------|--------|---------|
@@ -36,8 +38,8 @@ the backend, so the map fills in **live** as areas are probed.
 
 | Colour | Meaning |
 |--------|---------|
-| 🔴 Picnic Red | Picnic **delivers here** (`waitlist_area: false`) |
-| 🟠 Amber | **Waitlist** / coming soon (`waitlist_area: true`) |
+| 🔴 Picnic Red | Picnic **delivers here** (`waitlist_area: true`) |
+| 🟠 Amber | **Waitlist** / coming soon (`waitlist_area: false`) |
 | ⚪ Grey | No service / address not resolvable |
 | ▫️ Faint | Not yet checked |
 

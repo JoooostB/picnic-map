@@ -124,8 +124,12 @@ export async function checkPicnicCoverage(postcode, huisnummer) {
     return { status: 'error', raw: body };
   }
   if (status === 200 && body?.address) {
+    // NOTE: Picnic's `waitlist_area` is the OPPOSITE of what the name suggests.
+    // Empirically (confirmed against known delivery postcodes 1423/1433 and the
+    // whole Randstad core), waitlist_area=true marks an area Picnic ACTIVELY
+    // serves, while false marks a not-yet-served (join-the-waitlist) area.
     return {
-      status: body.waitlist_area ? 'waitlist' : 'covered',
+      status: body.waitlist_area ? 'covered' : 'waitlist',
       address: body.address,
       raw: body,
     };
