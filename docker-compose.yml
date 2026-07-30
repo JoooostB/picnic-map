@@ -8,8 +8,9 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
+      interval: 10s
+      # Generous timeout: IO stalls on the host must not fail a healthy Redis.
+      timeout: 5s
       retries: 5
 
   app:

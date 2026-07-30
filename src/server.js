@@ -12,6 +12,13 @@ app.use(express.json());
 // Total number of PC4 areas (constant for a run); cached to avoid re-parsing.
 let pc4Total = 0;
 
+// --- Liveness: process-alive only, deliberately NO Redis/downstream calls ---
+// A liveness endpoint that fails when a dependency is down causes restart
+// storms; dependency health belongs in readiness (/api/status) instead.
+app.get('/healthz', (_req, res) => {
+  res.set('Cache-Control', 'no-store').json({ ok: true, role: config.role });
+});
+
 // --- Static frontend ---
 app.use(express.static(path.resolve('public')));
 
@@ -120,7 +127,8 @@ async function liveStatus() {
   };
 }
 
-// --- Progress + stats (also the server pod's readiness probe target) ---
+// --- Progress + stats (the server pod's READINESS probe target; it depends
+// on Redis, so it must never be used for liveness — use /healthz for that) ---
 app.get('/api/status', async (_req, res) => {
   try {
     res.set('Cache-Control', 'no-store').json(await liveStatus());
