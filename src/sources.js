@@ -1,5 +1,6 @@
 import { config, keys } from './config.js';
 import { redis } from './redisClient.js';
+import { postJson as picnicPostJson } from './picnicClient.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -12,7 +13,7 @@ export class PicnicBlockedError extends Error {
   }
 }
 
-async function fetchJson(url, opts = {}, { retries = 3, backoffMs = 800 } = {}) {
+export async function fetchJson(url, opts = {}, { retries = 3, backoffMs = 800 } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -78,6 +79,42 @@ export async function findAddressesInPc4(pc4, n = 3) {
 }
 
 /**
+ * PDOK Locatieserver: find up to `n` real addresses inside one full postcode
+ * (PC6, e.g. 2461NK). Same register as findAddressesInPc4, but exact-matched
+ * on the PC6 so the probe address is guaranteed to sit in that postcode.
+ */
+export async function findAddressesInPc6(pc6, n = 2) {
+  const cached = await redis.get(keys.pdok6(pc6));
+  if (cached) return JSON.parse(cached);
+
+  const url =
+    `${config.pdokUrl}?q=postcode:${pc6}&fq=type:adres&fq=postcode:${pc6}` +
+    `&rows=${n}&fl=weergavenaam,postcode,huisnummer,centroide_ll`;
+  const { body } = await fetchJson(url);
+  const docs = body?.response?.docs || [];
+  const addresses = docs
+    .map((d) => {
+      const m = /POINT\(([-\d.]+) ([-\d.]+)\)/.exec(d.centroide_ll || '');
+      return {
+        postcode: d.postcode,
+        huisnummer: d.huisnummer,
+        lon: m ? Number(m[1]) : null,
+        lat: m ? Number(m[2]) : null,
+        weergavenaam: d.weergavenaam,
+      };
+    })
+    .filter((a) => a.postcode === pc6 && a.huisnummer != null);
+
+  await redis.set(
+    keys.pdok6(pc6),
+    JSON.stringify(addresses),
+    'PX',
+    addresses.length ? 30 * 24 * 3600 * 1000 : 6 * 3600 * 1000,
+  );
+  return addresses;
+}
+
+/**
  * postcode.tech: authoritative validation + enrichment (municipality, province,
  * geo). This is the required Dutch postcode source. Daily-budgeted.
  */
@@ -102,14 +139,13 @@ export async function enrichPostcode(postcode, huisnummer) {
  * Returns { status: 'covered'|'waitlist'|'not_found'|'invalid'|'error', raw }.
  */
 export async function checkPicnicCoverage(postcode, huisnummer) {
-  const { status, body, text } = await fetchJson(config.picnicUrl, {
-    method: 'POST',
-    headers: config.picnicHeaders,
-    body: JSON.stringify({
-      country_code: 'NL',
-      postcode: String(postcode),
-      house_number: String(huisnummer),
-    }),
+  // Route Picnic POSTs through CloakBrowser's stealth Chromium so the WAF sees a
+  // real browser fingerprint. All other sources (PDOK, postcode.tech) still use
+  // plain fetch — only Picnic gates on bot signals.
+  const { status, body, text } = await picnicPostJson(config.picnicUrl, {
+    country_code: 'NL',
+    postcode: String(postcode),
+    house_number: String(huisnummer),
   });
 
   // CloudFront WAF block — back off, do not treat as a coverage result.

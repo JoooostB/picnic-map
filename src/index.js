@@ -4,6 +4,7 @@
 import { config } from './config.js';
 import { startServer } from './server.js';
 import { startProber, startHealthServer } from './prober.js';
+import { closePicnicClient } from './picnicClient.js';
 
 const role = config.role;
 console.log(`[boot] starting role=${role} id=${config.proberId}`);
@@ -24,4 +25,12 @@ if (role === 'prober' || role === 'all') {
 if (!['server', 'prober', 'all'].includes(role)) {
   console.error(`[boot] unknown APP_ROLE "${role}" — use server | prober | all`);
   process.exit(1);
+}
+
+// Clean shutdown so the Chromium binary is closed rather than orphaned.
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, async () => {
+    await closePicnicClient();
+    process.exit(0);
+  });
 }

@@ -29,6 +29,11 @@ services:
       - PROBE_CONCURRENCY=1
       - PROBE_DELAY_MS=1100
       - POSTCODE_TECH_DAILY_LIMIT=9500
+      # PC6 refinement: after the PC4 sweep, probe every full postcode inside
+      # covered/waitlist areas for street-level accuracy (~460k probes/cycle).
+      - PC6_REFINE_ENABLED=true
+      # A full PC6 pass takes days at 1 probe/sec, so it recycles slower (30d).
+      #- PC6_CACHE_TTL_MS=2592000000
     ports:
       - "3000:3000"
     # Cache the downloaded PC4 GeoJSON on the host so rebuilds don't re-fetch.

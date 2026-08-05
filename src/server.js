@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import { config, keys } from './config.js';
 import { redis } from './redisClient.js';
-import { loadGeojson, listPc4Codes } from './geojson.js';
+import { loadGeojson, listPc4Codes, loadPc6Geojson, listPc6InPc4 } from './geojson.js';
 import { ptBudgetUsed } from './sources.js';
 import { bus } from './events.js';
 
@@ -56,7 +56,21 @@ async function readAllCoverage() {
   return out;
 }
 
-function slimCoverage(cov) {
+// Per-PC4 PC6 tallies, read from the single aggregate hash the prober keeps:
+// { "2461": { c, w, n, t }, ... } — counts of covered / waitlist / no-service
+// PC6s plus the area's total. Drives the "partially covered" styling.
+async function readAgg6() {
+  const flat = await redis.hgetall(keys.agg6);
+  const agg = {};
+  for (const [field, val] of Object.entries(flat)) {
+    const [pc4, bucket] = field.split(':');
+    if (!pc4 || !bucket) continue;
+    (agg[pc4] = agg[pc4] || { c: 0, w: 0, n: 0, t: 0 })[bucket] = Number(val) || 0;
+  }
+  return agg;
+}
+
+function slimCoverage(cov, agg = {}) {
   const slim = {};
   for (const [pc4, r] of Object.entries(cov)) {
     slim[pc4] = {
@@ -66,14 +80,53 @@ function slimCoverage(cov) {
       province: r.province || null,
       postcode: r.postcode || null,
     };
+    if (agg[pc4]) slim[pc4].pc6 = agg[pc4];
   }
   return slim;
 }
 
-// --- Coverage map: { "1011": {s, city, ...}, ... } ---
+// --- Coverage map: { "1011": {s, city, ..., pc6?: {c,w,n,t}}, ... } ---
 app.get('/api/coverage', async (_req, res) => {
   try {
-    res.set('Cache-Control', 'no-store').json(slimCoverage(await readAllCoverage()));
+    const [cov, agg] = await Promise.all([readAllCoverage(), readAgg6()]);
+    res.set('Cache-Control', 'no-store').json(slimCoverage(cov, agg));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- PC6 detail for one PC4 area ---
+const PC4_RE = /^\d{4}$/;
+
+// Polygon geometry (CBS via PDOK, cached server-side; boundaries are stable).
+app.get('/api/geojson6/:pc4', async (req, res) => {
+  if (!PC4_RE.test(req.params.pc4)) return res.status(400).json({ error: 'invalid pc4' });
+  try {
+    const fc = await loadPc6Geojson(req.params.pc4);
+    res.set('Cache-Control', 'public, max-age=86400').json(fc);
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Probed statuses: { "2461NK": { s: "waitlist" }, ... } (unprobed PC6s absent).
+app.get('/api/coverage6/:pc4', async (req, res) => {
+  if (!PC4_RE.test(req.params.pc4)) return res.status(400).json({ error: 'invalid pc4' });
+  try {
+    const codes = await listPc6InPc4(req.params.pc4);
+    const out = {};
+    if (codes.length) {
+      const vals = await redis.mget(codes.map((pc6) => keys.cov6(pc6)));
+      codes.forEach((pc6, i) => {
+        if (!vals[i]) return;
+        try {
+          out[pc6] = { s: JSON.parse(vals[i]).status };
+        } catch {
+          /* skip corrupt */
+        }
+      });
+    }
+    res.set('Cache-Control', 'no-store').json(out);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -114,6 +167,10 @@ async function liveStatus() {
     }
   }
   const cooldownMs = probers > 0 && coolingDown === probers && minCooldown !== Infinity ? minCooldown : 0;
+  const [pc6Refined, pc6Queued] = await Promise.all([
+    redis.get(keys.cov6Count),
+    redis.llen(keys.queue6),
+  ]);
   return {
     running: probers > 0,
     probers,
@@ -123,6 +180,7 @@ async function liveStatus() {
     lastPc4,
     cooldownMs,
     postcodeTech: { used: await ptBudgetUsed(), limit: config.postcodeTechDailyLimit },
+    pc6: { enabled: config.pc6Enabled, refined: Number(pc6Refined) || 0, queued: pc6Queued },
     updatedAt: Date.now(),
   };
 }
@@ -152,8 +210,8 @@ app.get('/api/stream', async (req, res) => {
   const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
   try {
-    const [coverage, status] = await Promise.all([readAllCoverage(), liveStatus()]);
-    send('snapshot', { coverage: slimCoverage(coverage), status });
+    const [coverage, status, agg] = await Promise.all([readAllCoverage(), liveStatus(), readAgg6()]);
+    send('snapshot', { coverage: slimCoverage(coverage, agg), status });
   } catch (err) {
     send('error', { message: err.message });
   }

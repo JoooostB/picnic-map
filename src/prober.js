@@ -1,15 +1,17 @@
 import http from 'http';
 import { config, keys } from './config.js';
 import { redis } from './redisClient.js';
-import { listPc4Codes } from './geojson.js';
+import { listPc4Codes, listPc6InPc4 } from './geojson.js';
 import {
   findAddressesInPc4,
+  findAddressesInPc6,
   enrichPostcode,
   checkPicnicCoverage,
   ptBudgetRemaining,
   incrPtBudget,
   PicnicBlockedError,
 } from './sources.js';
+import { initPicnicClient } from './picnicClient.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -51,6 +53,18 @@ async function isFresh(pc4) {
     const rec = JSON.parse(raw);
     if (rec.status === 'error') return false; // always retry errors
     return Date.now() - (rec.ts || 0) < config.cacheTtlMs;
+  } catch {
+    return false;
+  }
+}
+
+async function isFresh6(pc6) {
+  const raw = await redis.get(keys.cov6(pc6));
+  if (!raw) return false;
+  try {
+    const rec = JSON.parse(raw);
+    if (rec.status === 'error') return false; // always retry errors
+    return Date.now() - (rec.ts || 0) < config.pc6CacheTtlMs;
   } catch {
     return false;
   }
@@ -124,6 +138,92 @@ async function probeOne(pc4) {
   };
 }
 
+// ---- PC6 refinement --------------------------------------------------------
+
+// Tally bucket for the per-PC4 aggregate: covered / waitlist / no-service.
+// Errors are not counted (they get retried), so the aggregate only ever
+// reflects definitive answers.
+function bucketOf(status) {
+  if (status === 'covered') return 'c';
+  if (status === 'waitlist') return 'w';
+  if (status === 'not_found' || status === 'invalid' || status === 'nodata') return 'n';
+  return null;
+}
+
+// Keep the per-PC4 tallies in one hash so the server can HGETALL the whole
+// aggregate in a single call. Returns the area's counts after the update.
+async function updateAgg6(pc4, oldRaw, newStatus) {
+  let oldBucket = null;
+  if (oldRaw) {
+    try {
+      oldBucket = bucketOf(JSON.parse(oldRaw).status);
+    } catch {
+      /* corrupt old record — treat as uncounted */
+    }
+  }
+  const newBucket = bucketOf(newStatus);
+  if (oldBucket !== newBucket) {
+    if (oldBucket) await redis.hincrby(keys.agg6, `${pc4}:${oldBucket}`, -1);
+    if (newBucket) await redis.hincrby(keys.agg6, `${pc4}:${newBucket}`, 1);
+  }
+  const [c, w, n, t] = await redis.hmget(
+    keys.agg6,
+    `${pc4}:c`,
+    `${pc4}:w`,
+    `${pc4}:n`,
+    `${pc4}:t`,
+  );
+  return { c: Number(c) || 0, w: Number(w) || 0, n: Number(n) || 0, t: Number(t) || 0 };
+}
+
+// PC6 deltas ride the same pub/sub channel as PC4 ones; the `pc6` field is
+// what tells the frontend which kind it is looking at.
+function emitCoverage6(rec, agg) {
+  const payload = JSON.stringify({ pc6: rec.pc6, pc4: rec.pc4, s: rec.status, agg });
+  redis.publish(keys.events, payload).catch(() => {});
+}
+
+/**
+ * Probe a single full postcode (PC6): find a real address in it via PDOK,
+ * then ask Picnic. No postcode.tech enrichment here — the PC4 record already
+ * carries city/province, and ~100 PC6s per area would drain the daily budget.
+ */
+async function probeOnePc6(pc6) {
+  const pc4 = pc6.slice(0, 4);
+  let candidates = [];
+  try {
+    candidates = await findAddressesInPc6(pc6, 2);
+  } catch (err) {
+    return { status: 'error', pc6, pc4, reason: `pdok: ${err.message}`, ts: Date.now() };
+  }
+
+  if (!candidates.length) {
+    return { status: 'nodata', pc6, pc4, reason: 'no address in PC6', ts: Date.now() };
+  }
+
+  let result = null;
+  let used = candidates[0];
+  for (const cand of candidates) {
+    const r = await checkPicnicCoverage(pc6, cand.huisnummer);
+    used = cand;
+    result = r;
+    if (r.status === 'covered' || r.status === 'waitlist') break;
+    if (r.status === 'not_found' || r.status === 'invalid') {
+      await sleep(config.probeDelayMs);
+      continue;
+    }
+    break;
+  }
+
+  return {
+    status: result?.status || 'error',
+    pc6,
+    pc4,
+    huisnummer: used.huisnummer,
+    ts: Date.now(),
+  };
+}
+
 // ---- Shared work queue (Redis) --------------------------------------------
 
 // Refill the queue with every area that still needs probing. Guarded by a lock
@@ -145,12 +245,196 @@ async function refillQueue() {
   return added > 0;
 }
 
-// Claim the next area to probe, or null if there's nothing to do right now.
-async function nextPc4() {
-  let pc4 = await redis.lpop(keys.queue);
-  if (pc4) return pc4;
-  await refillQueue(); // empty — try to (re)fill it (one pod wins the lock)
-  return redis.lpop(keys.queue);
+// Refill the PC6 queue with stale full postcodes from covered/waitlist areas.
+// Runs in bursts (queue target) so a cold start doesn't enumerate the whole
+// country at once; the lock doubles as a scan throttle. Only ever reached when
+// the PC4 queue is drained, so broad coverage always wins.
+const PC6_QUEUE_TARGET = 1500;
+
+// The same "breadth before depth" idea, one level down. Probing every PC6 in
+// the country is ~460k requests; a spread sample of this many per area is ~3%
+// of that and already reveals WHICH areas are mixed (the accuracy problem —
+// e.g. 2461 Ter Aar vs Langeraar). Only once every area has been sampled do we
+// go back and fill in the remaining postcodes.
+const PC6_SAMPLE_N = 14;
+
+// Evenly-spaced picks across the (sorted) PC6 list. Postcode letters run
+// roughly with street order, so spreading the indices spreads them spatially.
+function stratifiedSample(codes, n) {
+  if (codes.length <= n) return [...codes];
+  const step = codes.length / n;
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(codes[Math.floor(i * step)]);
+  return [...new Set(out)];
+}
+
+// Per-area enqueue marker: "<phase>:<ts>", phase = sample | full. It also
+// spares us a ~100-GET freshness scan per area on every refill.
+async function readPhase6(pc4) {
+  const raw = await redis.get(keys.enq6(pc4));
+  if (!raw) return null;
+  const [phase, ts] = raw.split(':');
+  if (Date.now() - Number(ts || 0) >= config.pc6CacheTtlMs) return null; // cycle over
+  return phase;
+}
+
+async function refillQueue6() {
+  const got = await redis.set(keys.fillLock6, config.proberId, 'NX', 'EX', 60);
+  if (!got) return false;
+
+  const codes = await listPc4Codes();
+
+  // Pass 1 enqueues samples for never-sampled areas; only when none are left
+  // does pass 2 enqueue the remainder of already-sampled areas.
+  for (const phase of ['sample', 'full']) {
+    const queued = await redis.llen(keys.queue6);
+    let added = 0;
+    for (const pc4 of codes) {
+      if (queued + added >= PC6_QUEUE_TARGET) break;
+      const covRaw = await redis.get(keys.coverage(pc4));
+      if (!covRaw) continue;
+      let cov;
+      try {
+        cov = JSON.parse(covRaw);
+      } catch {
+        continue;
+      }
+      if (cov.status !== 'covered' && cov.status !== 'waitlist') continue;
+
+      const current = await readPhase6(pc4);
+      if (phase === 'sample' ? current !== null : current !== 'sample') continue;
+
+      let pc6codes;
+      try {
+        pc6codes = await listPc6InPc4(pc4);
+      } catch (err) {
+        console.warn(`[prober] PC6 list failed for ${pc4}: ${err.message}`);
+        continue; // no marker written — retried on a later refill
+      }
+      await redis.hset(keys.agg6, `${pc4}:t`, pc6codes.length);
+
+      const wanted = phase === 'sample' ? stratifiedSample(pc6codes, PC6_SAMPLE_N) : pc6codes;
+      const stale = [];
+      for (const pc6 of wanted) {
+        if (!(await isFresh6(pc6))) stale.push(pc6);
+      }
+      if (stale.length) {
+        await redis.rpush(keys.queue6, ...stale);
+        added += stale.length;
+      }
+      await redis.set(keys.enq6(pc4), `${phase}:${Date.now()}`);
+    }
+    if (added) {
+      console.log(`[prober] refilled PC6 queue with ${added} postcodes (${phase} pass)`);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Claim the next unit of work. Strict priority: the PC6 detail queue is only
+// touched when every PC4 area has been probed and is fresh ("match all numbers
+// first"). Refills are cheap no-ops while their lock/throttle key lives.
+async function nextTask() {
+  let code = await redis.lpop(keys.queue);
+  if (!code) {
+    await refillQueue(); // empty — try to (re)fill it (one pod wins the lock)
+    code = await redis.lpop(keys.queue);
+  }
+  if (code) return { kind: 'pc4', code };
+
+  if (!config.pc6Enabled) return null;
+  code = await redis.lpop(keys.queue6);
+  if (!code) {
+    await refillQueue6();
+    code = await redis.lpop(keys.queue6);
+  }
+  return code ? { kind: 'pc6', code } : null;
+}
+
+// Register a Picnic WAF block: cool this pod down and grow the back-off.
+function noteBlock() {
+  proberState.blocks++;
+  proberState.cooldownUntil = Date.now() + proberState.cooldownMs;
+  console.warn(
+    `[prober ${config.proberId}] Picnic blocked — cooling down ${Math.round(
+      proberState.cooldownMs / 1000,
+    )}s (block #${proberState.blocks})`,
+  );
+  proberState.cooldownMs = Math.min(proberState.cooldownMs * 2, COOLDOWN_MAX_MS);
+}
+
+// Probe one claimed PC4 area. Returns true when a Picnic probe was attempted
+// (the caller then applies the inter-probe delay), false on a no-op or block.
+async function runPc4Task(pc4) {
+  // Mark in-flight so another pod won't grab the same area during a refill race.
+  const claimed = await redis.set(keys.claim(pc4), config.proberId, 'NX', 'EX', config.claimTtlS);
+  if (!claimed) return false;
+  if (await isFresh(pc4)) {
+    await redis.del(keys.claim(pc4));
+    return false;
+  }
+
+  try {
+    const rec = await probeOne(pc4);
+    await redis.set(keys.coverage(pc4), JSON.stringify(rec));
+    await redis.del(keys.claim(pc4));
+    proberState.lastPc4 = pc4;
+    proberState.done++;
+    emitCoverage(pc4, rec);
+    proberState.cooldownMs = COOLDOWN_BASE_MS; // healthy — relax the back-off
+  } catch (err) {
+    if (err instanceof PicnicBlockedError) {
+      // Put it back for another (un-blocked) pod and cool down THIS pod.
+      await redis.lpush(keys.queue, pc4);
+      await redis.del(keys.claim(pc4));
+      noteBlock();
+      return false;
+    }
+    const rec = { status: 'error', pc4, reason: err.message, ts: Date.now() };
+    await redis.set(keys.coverage(pc4), JSON.stringify(rec));
+    await redis.del(keys.claim(pc4));
+    proberState.done++;
+    emitCoverage(pc4, rec);
+  }
+  return true;
+}
+
+// Probe one claimed PC6 postcode. Same claim/back-off dance as runPc4Task,
+// plus the per-PC4 aggregate bookkeeping that drives the "partial" styling.
+async function runPc6Task(pc6) {
+  const claimed = await redis.set(keys.claim6(pc6), config.proberId, 'NX', 'EX', config.claimTtlS);
+  if (!claimed) return false;
+  if (await isFresh6(pc6)) {
+    await redis.del(keys.claim6(pc6));
+    return false;
+  }
+
+  // The previous record (if any) is needed to move its aggregate tally.
+  const oldRaw = await redis.get(keys.cov6(pc6));
+
+  let rec;
+  try {
+    rec = await probeOnePc6(pc6);
+    proberState.cooldownMs = COOLDOWN_BASE_MS; // healthy — relax the back-off
+  } catch (err) {
+    if (err instanceof PicnicBlockedError) {
+      await redis.lpush(keys.queue6, pc6);
+      await redis.del(keys.claim6(pc6));
+      noteBlock();
+      return false;
+    }
+    rec = { status: 'error', pc6, pc4: pc6.slice(0, 4), reason: err.message, ts: Date.now() };
+  }
+
+  await redis.set(keys.cov6(pc6), JSON.stringify(rec));
+  await redis.del(keys.claim6(pc6));
+  if (!oldRaw) await redis.incr(keys.cov6Count);
+  const agg = await updateAgg6(rec.pc4, oldRaw, rec.status);
+  proberState.lastPc4 = pc6;
+  proberState.done++;
+  emitCoverage6(rec, agg);
+  return true;
 }
 
 async function worker() {
@@ -162,50 +446,14 @@ async function worker() {
       continue;
     }
 
-    const pc4 = await nextPc4();
-    if (!pc4) {
-      await sleep(config.idleWaitMs); // queue drained and everything is fresh
+    const task = await nextTask();
+    if (!task) {
+      await sleep(config.idleWaitMs); // queues drained and everything is fresh
       continue;
     }
 
-    // Mark in-flight so another pod won't grab the same area during a refill race.
-    const claimed = await redis.set(keys.claim(pc4), config.proberId, 'NX', 'EX', config.claimTtlS);
-    if (!claimed) continue;
-    if (await isFresh(pc4)) {
-      await redis.del(keys.claim(pc4));
-      continue;
-    }
-
-    try {
-      const rec = await probeOne(pc4);
-      await redis.set(keys.coverage(pc4), JSON.stringify(rec));
-      await redis.del(keys.claim(pc4));
-      proberState.lastPc4 = pc4;
-      proberState.done++;
-      emitCoverage(pc4, rec);
-      proberState.cooldownMs = COOLDOWN_BASE_MS; // healthy — relax the back-off
-    } catch (err) {
-      if (err instanceof PicnicBlockedError) {
-        // Put it back for another (un-blocked) pod and cool down THIS pod.
-        await redis.lpush(keys.queue, pc4);
-        await redis.del(keys.claim(pc4));
-        proberState.blocks++;
-        proberState.cooldownUntil = Date.now() + proberState.cooldownMs;
-        console.warn(
-          `[prober ${config.proberId}] Picnic blocked — cooling down ${Math.round(
-            proberState.cooldownMs / 1000,
-          )}s (block #${proberState.blocks})`,
-        );
-        proberState.cooldownMs = Math.min(proberState.cooldownMs * 2, COOLDOWN_MAX_MS);
-        continue;
-      }
-      const rec = { status: 'error', pc4, reason: err.message, ts: Date.now() };
-      await redis.set(keys.coverage(pc4), JSON.stringify(rec));
-      await redis.del(keys.claim(pc4));
-      proberState.done++;
-      emitCoverage(pc4, rec);
-    }
-    await sleep(config.probeDelayMs);
+    const probed = task.kind === 'pc4' ? await runPc4Task(task.code) : await runPc6Task(task.code);
+    if (probed) await sleep(config.probeDelayMs);
   }
 }
 
@@ -241,11 +489,15 @@ export async function startProber() {
     /* total is also re-set on refill */
   }
 
+  // Warm CloakBrowser before workers start so a launch failure fails boot
+  // (rather than every probe timing out on first launch).
+  await initPicnicClient();
+
   await heartbeat();
   setInterval(heartbeat, config.heartbeatMs);
 
   console.log(
-    `[prober ${config.proberId}] started, concurrency=${config.probeConcurrency}, delay=${config.probeDelayMs}ms`,
+    `[prober ${config.proberId}] started, concurrency=${config.probeConcurrency}, delay=${config.probeDelayMs}ms, pc6=${config.pc6Enabled}`,
   );
   for (let i = 0; i < Math.max(1, config.probeConcurrency); i++) {
     worker().catch((e) => console.error('[prober] worker crashed', e));

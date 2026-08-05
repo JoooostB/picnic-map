@@ -169,6 +169,7 @@
 
     <ul class="legend">
       <li><span class="swatch swatch--covered"></span> Delivers here <b id="cntCovered">0</b></li>
+      <li><span class="swatch swatch--partial"></span> Partially covered <b id="cntPartial">0</b></li>
       <li><span class="swatch swatch--waitlist"></span> Waitlist / coming soon <b id="cntWaitlist">0</b></li>
       <li><span class="swatch swatch--none"></span> No service / unknown <b id="cntNone">0</b></li>
       <li><span class="swatch swatch--pending"></span> Not yet checked <b id="cntPending">0</b></li>
@@ -181,6 +182,7 @@
       </div>
       <div class="bar bar--thin"><div class="bar__fill bar__fill--scan" id="scanBar" style="width:0%"></div></div>
       <div class="progress__meta" id="budgetLabel"></div>
+      <div class="progress__meta" id="pc6Label"></div>
     </div>
   </aside>
 
@@ -208,14 +210,15 @@
           indicate which service this map describes.
         </p>
         <p>
-          Coverage is <strong>sampled</strong> (one address per postcode area) from publicly
-          accessible endpoints and is <strong>indicative only</strong> — it may be inaccurate,
+          Coverage is <strong>sampled</strong> (one address per postcode area, and one address
+          per full postcode where refined) from publicly accessible endpoints and is
+          <strong>indicative only</strong> — it may be inaccurate,
           incomplete or out of date, and is provided <strong>“as is” without any warranty</strong>.
           For authoritative, up-to-date delivery availability, always check
           <a href="https://picnic.app" target="_blank" rel="noopener nofollow">picnic.app</a>.
         </p>
         <p class="disclaimer__data">
-          Data &amp; libraries: Picnic check-address · postcode.tech · PDOK · cartomap ·
+          Data &amp; libraries: Picnic check-address · postcode.tech · PDOK · CBS · cartomap ·
           OpenStreetMap / CARTO · Leaflet — not affiliated with any of these either.
         </p>
       </div>

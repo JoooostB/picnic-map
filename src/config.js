@@ -28,6 +28,16 @@ export const config = {
   // Re-probe entries older than this (ms). Default 14 days.
   cacheTtlMs: Number(process.env.CACHE_TTL_MS || 14 * 24 * 60 * 60 * 1000),
 
+  // PC6 refinement: after the PC4 sweep is complete, probe every full postcode
+  // (PC6, e.g. 2461NK) inside covered/waitlist PC4 areas for a detailed view.
+  // A full PC6 pass is ~460k probes, so it re-runs on a slower cycle (30 days).
+  pc6Enabled: (process.env.PC6_REFINE_ENABLED || 'true') === 'true',
+  pc6CacheTtlMs: Number(process.env.PC6_CACHE_TTL_MS || 30 * 24 * 60 * 60 * 1000),
+
+  // CBS PC6 polygons via PDOK WFS (CC-BY 4.0, free, no key). Filtered per PC4
+  // prefix so we only ever fetch geometry for areas that get refined.
+  pc6WfsUrl: 'https://service.pdok.nl/cbs/postcode6/2023/wfs/v1_0',
+
   // Distributed probing coordination
   heartbeatMs: 5000, // how often a prober refreshes its liveness record
   heartbeatTtlS: 15, // prober record expiry (missed ~2 beats = considered dead)
@@ -38,16 +48,9 @@ export const config = {
   // postcode.tech is limited to 10k calls/day — keep a safety margin.
   postcodeTechDailyLimit: Number(process.env.POSTCODE_TECH_DAILY_LIMIT || 9500),
 
-  // Picnic public check-address endpoint + headers mirrored from the HAR capture.
+  // Picnic public check-address endpoint. Request is issued by picnicClient via
+  // CloakBrowser; UA/platform headers are set by the stealth browser itself.
   picnicUrl: 'https://picnic.app/nl/rest/public-api/15/user-onboarding/check-address',
-  picnicHeaders: {
-    'content-type': 'application/json;charset=UTF-8',
-    accept: 'application/json, text/plain, */*',
-    origin: 'https://picnic.app',
-    referer: 'https://picnic.app/nl/online-supermarkt/bezorging/',
-    'user-agent':
-      'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Mobile Safari/537.36',
-  },
 
   // PDOK Locatieserver — free, no key. Used only to discover a real, existing
   // (postcode + house number) inside each PC4 so we have a valid probe address.
@@ -62,10 +65,22 @@ export const keys = {
   ptCounter: (day) => `pcmap:pt:count:${day}`,
   pdokCache: (pc4) => `pcmap:pdok:${pc4}`,
 
+  // PC6 refinement
+  cov6: (pc6) => `pcmap:cov6:${pc6}`, // per-PC6 coverage record
+  agg6: 'pcmap:agg6', // HASH: `${pc4}:c|w|n` = probed counts, `${pc4}:t` = total PC6
+  pc6Geo: (pc4) => `pcmap:geo6:${pc4}`, // slimmed PC6 polygon FeatureCollection
+  pc6List: (pc4) => `pcmap:pc6list:${pc4}`, // JSON array of PC6 codes in a PC4
+  pdok6: (pc6) => `pcmap:pdok6:${pc6}`, // cached candidate addresses per PC6
+  enq6: (pc4) => `pcmap:enq6:${pc4}`, // ts of last full enqueue of an area's PC6s
+  cov6Count: 'pcmap:stats:cov6', // running count of distinct PC6s probed
+
   // Distributed probing
   queue: 'pcmap:queue', // Redis list of PC4 codes waiting to be probed
+  queue6: 'pcmap:queue6', // Redis list of PC6 codes (only drained when queue is empty)
   fillLock: 'pcmap:fill-lock', // only one prober refills the queue at a time
+  fillLock6: 'pcmap:fill-lock6', // ditto for the PC6 queue (also throttles scans)
   claim: (pc4) => `pcmap:claim:${pc4}`, // in-flight marker (which pod owns it)
+  claim6: (pc6) => `pcmap:claim6:${pc6}`, // in-flight marker for a PC6 probe
   events: 'pcmap:events', // pub/sub channel for live coverage deltas
   probers: 'pcmap:probers', // SET of currently-alive prober ids
   prober: (id) => `pcmap:prober:${id}`, // per-prober heartbeat record (TTL)
