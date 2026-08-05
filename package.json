@@ -8,7 +8,7 @@
     "start": "node src/server.js"
   },
   "dependencies": {
-    "cloakbrowser": "^1.0.0",
+    "cloakbrowser": "^0.5.4",
     "express": "^5.2.1",
     "ioredis": "^5.11.1",
     "playwright-core": "^1.49.0"
