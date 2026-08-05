@@ -7,8 +7,9 @@ FROM node:24-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates fonts-liberation \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-    libdrm2 libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 \
-    libgbm1 libpango-1.0-0 libcairo2 libasound2 libatspi2.0-0 \
+    libdrm2 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+    libxkbcommon0 libxshmfence1 libgbm1 libpango-1.0-0 libcairo2 \
+    libasound2 libatspi2.0-0 \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -22,6 +23,9 @@ RUN npm install --omit=dev
 # rather than the default ~/.cloakbrowser so the location is deterministic
 # regardless of runtime user (and survives a switch to non-root later).
 ENV CLOAKBROWSER_CACHE_DIR=/opt/cloakbrowser
+# Non-fatal fingerprint quality warning about missing Windows fonts. We accept
+# the weaker font fingerprint rather than pull in ~50MB of msttcorefonts.
+ENV CLOAKBROWSER_SUPPRESS_FONT_WARNING=1
 RUN npx --yes cloakbrowser install
 
 # Application code
